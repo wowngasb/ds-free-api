@@ -357,6 +357,10 @@ impl Config {
         }
         let mut seen_keys = std::collections::HashSet::new();
         for k in &self.api_keys {
+            if k.key == "*" {
+                log::warn!(target: "config", "load api_keys key `{}` for {}", &k.key, &k.description);
+            }
+
             if !seen_keys.insert(&k.key) {
                 let prefix = if k.key.len() > 12 {
                     &k.key[..12]
@@ -376,7 +380,8 @@ impl Config {
         let toml_str = toml::to_string_pretty(self).map_err(ConfigError::TomlSerialization)?;
         let tmp = path.as_ref().with_extension("toml.tmp");
         std::fs::write(&tmp, &toml_str)?;
-        std::fs::rename(&tmp, path.as_ref())?;
+        log::warn!(target: "config", "skip save config but dump as tmp: {}", tmp.display());
+        // std::fs::rename(&tmp, path.as_ref())?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

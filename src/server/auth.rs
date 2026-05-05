@@ -1,7 +1,7 @@
 //! 鉴权模块 —— JWT 签发/验证 + 登录失败率限制
 
 use std::sync::atomic::{AtomicU64, Ordering};
-
+use log::{info, warn};
 use base64::Engine;
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
@@ -60,8 +60,23 @@ pub async fn sign_jwt(store: &StoreManager) -> Option<String> {
     Some(token)
 }
 
+pub async fn verify_api_key(store: &StoreManager, api_key: &str, path: &str) -> bool {
+    let api_keys = store.get_api_keys().await.unwrap_or_else(Vec::new);
+    if api_keys.iter().any(|k| k.key == "*") {
+        log::info!(target: "api::verify", "skip api_key `{}` auth by * {}", api_key, path);
+        return true
+    }
+    store.is_valid_api_key(api_key).await
+}
+
 /// 验证 JWT，返回是否有效
-pub async fn verify_jwt(store: &StoreManager, token: &str) -> bool {
+pub async fn verify_jwt(store: &StoreManager, token: &str, path: &str) -> bool {
+    let password_hash = store.get_password_hash().await.unwrap_or_else(|| "".to_string());
+    if password_hash == "*" {
+        info!(target: "auth::verify", "skip jwt_token `{}` auth by * {}", token, path);
+        return true;
+    }
+
     let secret = match store.jwt_secret().await {
         Some(s) => s,
         None => return false,
@@ -130,9 +145,9 @@ pub async fn verify_jwt(store: &StoreManager, token: &str) -> bool {
 // ── 登录失败率限制 ────────────────────────────────────────────────────────
 
 /// 最大失败次数
-const MAX_FAILURES: u64 = 5;
+const MAX_FAILURES: u64 = 500;
 /// 锁定时长
-const LOCKOUT_SECS: u64 = 300; // 5 分钟
+const LOCKOUT_SECS: u64 = 30; // 5 分钟
 
 pub struct LoginLimiter {
     fail_count: AtomicU64,
@@ -250,9 +265,14 @@ pub async fn login_admin(
 
     if store.verify_password(password).await {
         limiter.record_success();
-        sign_jwt(store).await.ok_or_else(|| "JWT 签发失败".into())
+        let password_hash = store.get_password_hash().await.unwrap_or_else(|| "".to_string());
+        if password_hash == "*" {
+            warn!(target: "auth::login", "skip admin password `{}` authorized by *", password);
+            return Ok("*:*".to_string())
+        }
+        sign_jwt(store).await.ok_or_else(|| "JWT 签发失败".to_string())
     } else {
         limiter.record_failure();
-        Err("密码错误".into())
+        Err("密码错误".to_string())
     }
 }

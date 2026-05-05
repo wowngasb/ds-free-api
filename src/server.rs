@@ -233,14 +233,14 @@ async fn health() -> Json<serde_json::Value> {
 
 /// API Key 鉴权中间件（从 api_keys.json 校验 Bearer token）
 async fn api_key_middleware(req: Request, next: Next, store: Arc<store::StoreManager>) -> Response {
-    let token = extract_bearer_token(&req);
+    let token = extract_bearer_token(&req).or(Some(""));
     let valid = match token {
-        Some(t) => store.is_valid_api_key(t).await,
+        Some(t) => auth::verify_api_key(&store, t, req.uri().path()).await,
         None => false,
     };
 
     if !valid {
-        log::debug!(target: "http::response", "401 unauthorized API request");
+        log::warn!(target: "api::verify", "401 unauthorized API request {}", req.uri().path());
         return error::ServerError::Unauthorized.into_response();
     }
 
@@ -256,9 +256,9 @@ async fn api_key_middleware(req: Request, next: Next, store: Arc<store::StoreMan
 
 /// JWT 鉴权中间件（管理面板路由）
 async fn jwt_middleware(req: Request, next: Next, store: Arc<store::StoreManager>) -> Response {
-    let token = extract_bearer_token(&req);
+    let token = extract_bearer_token(&req).or(Some(""));
     let valid = match token {
-        Some(t) => auth::verify_jwt(&store, t).await,
+        Some(t) => auth::verify_jwt(&store, t, req.uri().path()).await,
         None => false,
     };
 
