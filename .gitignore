@@ -47,3 +47,5 @@ lerna-debug.log*
 
 # 呃
 .claude
+ds-free-api.exe
+ds-free-api_*.exe

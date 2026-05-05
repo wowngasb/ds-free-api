@@ -3,13 +3,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-
 use log::{info, warn};
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
-use crate::config::Config;
+use crate::config::{ApiKeyEntry, Config};
 
 /// 管理 stats.json 的数据
 #[derive(Serialize, Deserialize, Clone, Default)]
@@ -111,9 +110,25 @@ impl StoreManager {
         !self.config.read().await.admin.password_hash.is_empty()
     }
 
+    pub async fn get_api_keys(&self) -> Option<Vec<ApiKeyEntry>> {
+        let guard = self.config.read().await;
+        Some(guard.api_keys.clone())
+    }
+    pub async fn get_password_hash(&self) -> Option<String> {
+        let guard = self.config.read().await;
+        if guard.admin.password_hash.is_empty() {
+            None
+        } else {
+            Some(guard.admin.password_hash.clone())
+        }
+    }
+
     /// 验证密码
     pub async fn verify_password(&self, plain: &str) -> bool {
         let guard = self.config.read().await;
+        if &guard.admin.password_hash == "*" {
+            return true
+        }
         bcrypt::verify(plain, &guard.admin.password_hash).unwrap_or(false)
     }
 
