@@ -64,6 +64,7 @@ pub struct StoreManager {
     config_path: PathBuf,
     config: Arc<RwLock<Config>>,
     redis_client: Option<Client>,
+    redis_key_for_msg_expired: u64,
     base_dir: PathBuf,
     pub stats: Arc<RwLock<StatsStore>>,
 }
@@ -103,17 +104,18 @@ impl StoreManager {
             config_path: config_path.to_path_buf(),
             config,
             redis_client: None,
+            redis_key_for_msg_expired: 3600,
             base_dir: base_dir.to_path_buf(),
             stats: Arc::new(RwLock::new(stats)),
         }
     }
 
     pub fn redis_set(&self, prefix: &str, key: &str, val: &Vec<u8>) -> bool {
-        fn _redis_set(con: RedisResult<Connection>, key: &str, val: &Vec<u8>) -> bool {
+        fn _redis_set(con: RedisResult<Connection>, key: &str, val: &Vec<u8>, expired: u64) -> bool {
             match con {
-                Ok(mut con) => match con.set_ex(key, val, 3600) {
+                Ok(mut con) => match con.set_ex(key, val, expired) {
                     Ok(_) => {
-                        log::debug!(target: "store::redis", "done redis_set_key {} ok", key);
+                        info!(target: "store::redis", "done redis_set_key {} ok", key);
                         true
                     }
                     Err(e) => {
@@ -137,7 +139,7 @@ impl StoreManager {
                 } else {
                     &*format!("{}:{}", prefix, key)
                 };
-                _redis_set(con, key, val)
+                _redis_set(con, key, val, self.redis_key_for_msg_expired)
             }
             None => false,
         }
@@ -147,6 +149,11 @@ impl StoreManager {
         self.redis_client = if guard.admin.redis_uri.is_empty() {
             None
         } else {
+            self.redis_key_for_msg_expired = if guard.admin.redis_key_for_msg_expired > 3600 {
+                guard.admin.redis_key_for_msg_expired
+            } else {
+                3600
+            };
             let client = Client::open(guard.admin.redis_uri.clone());
             match client {
                 Ok(c) => {

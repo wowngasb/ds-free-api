@@ -63,7 +63,11 @@ pub async fn sign_jwt(store: &StoreManager) -> Option<String> {
 pub async fn verify_api_key(store: &StoreManager, api_key: &str, path: &str) -> bool {
     let api_keys = store.get_api_keys().await.unwrap_or_else(Vec::new);
     if api_keys.iter().any(|k| k.key == "*") {
-        log::info!(target: "api::verify", "skip api_key `{}` auth by * {}", api_key, path);
+        if path != "/anthropic/v1/messages" && path != "/anthropic/v1/messages/count_tokens" {
+            info!(target: "api::verify", "skip api_key `{}` auth by * {}", api_key, path);
+        } else {
+            log::debug!(target: "api::verify", "skip api_key `{}` auth by * {}", api_key, path);
+        }
         return true
     }
     store.is_valid_api_key(api_key).await
@@ -73,7 +77,11 @@ pub async fn verify_api_key(store: &StoreManager, api_key: &str, path: &str) -> 
 pub async fn verify_jwt(store: &StoreManager, token: &str, path: &str) -> bool {
     let password_hash = store.get_password_hash().await.unwrap_or_else(|| "".to_string());
     if password_hash == "*" {
-        info!(target: "auth::verify", "skip jwt_token `{}` auth by * {}", token, path);
+        if path != "/admin/api/logs" && path != "/admin/api/status" && path != "/admin/api/stats" && path != "/anthropic/v1/messages/count_tokens" {
+            info!(target: "auth::verify", "skip jwt_token `{}` auth by * {}", token, path);
+        } else {
+            log::debug!(target: "auth::verify", "skip jwt_token `{}` auth by * {}", token, path);
+        }
         return true;
     }
 

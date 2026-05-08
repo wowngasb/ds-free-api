@@ -34,6 +34,9 @@ pub struct AdminConfig {
     /// redis uri 用于暂存请求日志
     #[serde(default)]
     pub redis_uri: String,
+    /// redis msg 存储 key 有效时间 最小一个小时 3600
+    #[serde(default)]
+    pub redis_key_for_msg_expired: u64,
     /// bcrypt 哈希后的密码
     #[serde(default)]
     pub password_hash: String,
