@@ -43,11 +43,14 @@ pub async fn run(config: Config, config_path: PathBuf) -> anyhow::Result<()> {
     let config = Arc::new(tokio::sync::RwLock::new(config));
     let anthropic_compat = Arc::new(AnthropicCompat::new(Arc::clone(&adapter)));
     let data_dir = std::env::var("DS_DATA_DIR").unwrap_or_else(|_| ".".to_string());
-    let store = Arc::new(store::StoreManager::new(
+    let mut store_inner = store::StoreManager::new(
         std::path::Path::new(&data_dir),
         &config_path,
         config.clone(),
-    ));
+    );
+    store_inner.init_redis().await;
+    let store = Arc::new(store_inner);
+
     let stats = Arc::new(stats::Stats::new_with_store(Some(store.clone())));
     let login_limiter = Arc::new(auth::LoginLimiter::new());
     let state = AppState {

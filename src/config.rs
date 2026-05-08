@@ -31,6 +31,9 @@ pub struct Config {
 /// Admin 配置
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct AdminConfig {
+    /// redis uri 用于暂存请求日志
+    #[serde(default)]
+    pub redis_uri: String,
     /// bcrypt 哈希后的密码
     #[serde(default)]
     pub password_hash: String,
