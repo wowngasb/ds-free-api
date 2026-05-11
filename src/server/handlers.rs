@@ -2,6 +2,7 @@
 //!
 //! 所有业务逻辑在 adapter 中，handler 只做参数提取和响应格式化。
 
+use rand::{Rng, SeedableRng, rngs::SmallRng};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -125,9 +126,49 @@ where
 }
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+static NODE_ID: AtomicU64 = AtomicU64::new(0);
+
+fn get_now() -> u128 {
+    let now = std::time::SystemTime::now();
+    now.duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
+fn get_node_id() -> u64 {
+    let current = NODE_ID.load(Ordering::Acquire);
+    if current != 0 {
+        return current;
+    }
+
+    let mut rng = SmallRng::seed_from_u64(get_now() as u64);
+    let random_u64 = rng.next_u64();
+    let new_id = random_u64 & 0xFFFF;
+    match NODE_ID.compare_exchange(0, new_id, Ordering::AcqRel, Ordering::Acquire) {
+        Ok(_) => new_id,
+        Err(existing) => existing,
+    }
+}
+
+fn generate_custom_uuid(seq: u64) -> String {
+    let timestamp = get_now() as u64;
+    let node_id = get_node_id();
+
+    let time_low = (timestamp & 0xFFFFFFFF) as u32;
+    let time_mid = ((timestamp >> 32) & 0xFFFF) as u16;
+    let clock_seq = (seq & 0x3FFF) as u16 | 0x8000;
+    let node = (node_id & 0xFFFF) as u16;
+
+    // UUID 字符串: 8-4-4-4
+    format!(
+        "{:08x}-{:04x}-{:04x}-{:04x}",
+        time_low, time_mid, clock_seq, node,
+    )
+}
 
 fn next_request_id() -> String {
-    format!("req-{:x}", REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed))
+    let seq = REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("req-{}", generate_custom_uuid(seq))
 }
 
 const X_DS_ACCOUNT: &str = "x-ds-account";
@@ -282,6 +323,7 @@ pub(crate) async fn chat_completions(
                 success: true,
             });
             let bytes = serde_json::to_vec(&json).unwrap();
+            state.store.redis_set("openai", &request_id, &bytes);
             log::debug!(target: "http::response", "req={} 200 JSON response {} bytes", request_id, bytes.len());
             Ok(Response::builder()
                 .status(StatusCode::OK)
@@ -411,6 +453,7 @@ pub(crate) async fn anthropic_messages(
                 success: true,
             });
             let bytes = serde_json::to_vec(&json).unwrap();
+            state.store.redis_set("anthropic", &request_id, &bytes);
             log::debug!(target: "http::response", "req={} 200 JSON response {} bytes", request_id, bytes.len());
             Ok(Response::builder()
                 .status(StatusCode::OK)

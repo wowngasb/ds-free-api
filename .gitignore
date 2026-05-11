@@ -48,3 +48,5 @@ lerna-debug.log*
 # 呃
 .claude
 .deepseek
+ds-free-api.exe
+ds-free-api_*.exe

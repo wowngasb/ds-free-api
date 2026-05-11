@@ -43,11 +43,14 @@ pub async fn run(config: Config, config_path: PathBuf) -> anyhow::Result<()> {
     let config = Arc::new(tokio::sync::RwLock::new(config));
     let anthropic_compat = Arc::new(AnthropicCompat::new(Arc::clone(&adapter)));
     let data_dir = std::env::var("DS_DATA_DIR").unwrap_or_else(|_| ".".to_string());
-    let store = Arc::new(store::StoreManager::new(
+    let mut store_inner = store::StoreManager::new(
         std::path::Path::new(&data_dir),
         &config_path,
         config.clone(),
-    ));
+    );
+    store_inner.init_redis().await;
+    let store = Arc::new(store_inner);
+
     let stats = Arc::new(stats::Stats::new_with_store(Some(store.clone())));
     let login_limiter = Arc::new(auth::LoginLimiter::new());
     let state = AppState {
@@ -233,14 +236,14 @@ async fn health() -> Json<serde_json::Value> {
 
 /// API Key 鉴权中间件（从 api_keys.json 校验 Bearer token）
 async fn api_key_middleware(req: Request, next: Next, store: Arc<store::StoreManager>) -> Response {
-    let token = extract_bearer_token(&req);
+    let token = extract_bearer_token(&req).or(Some(""));
     let valid = match token {
-        Some(t) => store.is_valid_api_key(t).await,
+        Some(t) => auth::verify_api_key(&store, t, req.uri().path()).await,
         None => false,
     };
 
     if !valid {
-        log::debug!(target: "http::response", "401 unauthorized API request");
+        log::warn!(target: "api::verify", "401 unauthorized API request {}", req.uri().path());
         return error::ServerError::Unauthorized.into_response();
     }
 
@@ -256,9 +259,9 @@ async fn api_key_middleware(req: Request, next: Next, store: Arc<store::StoreMan
 
 /// JWT 鉴权中间件（管理面板路由）
 async fn jwt_middleware(req: Request, next: Next, store: Arc<store::StoreManager>) -> Response {
-    let token = extract_bearer_token(&req);
+    let token = extract_bearer_token(&req).or(Some(""));
     let valid = match token {
-        Some(t) => auth::verify_jwt(&store, t).await,
+        Some(t) => auth::verify_jwt(&store, t, req.uri().path()).await,
         None => false,
     };
 

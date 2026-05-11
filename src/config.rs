@@ -31,6 +31,12 @@ pub struct Config {
 /// Admin 配置
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct AdminConfig {
+    /// redis uri 用于暂存请求日志
+    #[serde(default)]
+    pub redis_uri: String,
+    /// redis msg 存储 key 有效时间 最小一个小时 3600
+    #[serde(default)]
+    pub redis_key_for_msg_expired: u64,
     /// bcrypt 哈希后的密码
     #[serde(default)]
     pub password_hash: String,
@@ -358,6 +364,10 @@ impl Config {
         }
         let mut seen_keys = std::collections::HashSet::new();
         for k in &self.api_keys {
+            if k.key == "*" {
+                log::warn!(target: "config", "load api_keys key `{}` for {}", &k.key, &k.description);
+            }
+
             if !seen_keys.insert(&k.key) {
                 let prefix = if k.key.len() > 12 {
                     &k.key[..12]
@@ -377,7 +387,8 @@ impl Config {
         let toml_str = toml::to_string_pretty(self).map_err(ConfigError::TomlSerialization)?;
         let tmp = path.as_ref().with_extension("toml.tmp");
         std::fs::write(&tmp, &toml_str)?;
-        std::fs::rename(&tmp, path.as_ref())?;
+        log::warn!(target: "config", "skip save config but dump as tmp: {}", tmp.display());
+        // std::fs::rename(&tmp, path.as_ref())?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

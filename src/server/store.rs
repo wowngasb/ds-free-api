@@ -9,7 +9,8 @@ use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
-use crate::config::Config;
+use redis::{Client, Connection, RedisResult, TypedCommands};
+use crate::config::{ApiKeyEntry, Config};
 
 /// 管理 stats.json 的数据
 #[derive(Serialize, Deserialize, Clone, Default)]
@@ -63,6 +64,8 @@ pub struct RequestLogData {
 pub struct StoreManager {
     config_path: PathBuf,
     config: Arc<RwLock<Config>>,
+    redis_client: Option<Client>,
+    redis_key_for_msg_expired: u64,
     base_dir: PathBuf,
     pub stats: Arc<RwLock<StatsStore>>,
 }
@@ -101,9 +104,69 @@ impl StoreManager {
         Self {
             config_path: config_path.to_path_buf(),
             config,
+            redis_client: None,
+            redis_key_for_msg_expired: 3600,
             base_dir: base_dir.to_path_buf(),
             stats: Arc::new(RwLock::new(stats)),
         }
+    }
+
+    pub fn redis_set(&self, prefix: &str, key: &str, val: &Vec<u8>) -> bool {
+        fn _redis_set(con: RedisResult<Connection>, key: &str, val: &Vec<u8>, expired: u64) -> bool {
+            match con {
+                Ok(mut con) => match con.set_ex(key, val, expired) {
+                    Ok(_) => {
+                        info!(target: "store::redis", "done redis_set_key {} ok", key);
+                        true
+                    }
+                    Err(e) => {
+                        warn!(target: "store::redis", "skip redis redis_set_key {} err {}", key, e.to_string());
+                        false
+                    }
+                },
+                Err(e) => {
+                    warn!(target: "store::redis", "skip redis get_connection {} err {}", key, e.to_string());
+                    false
+                }
+            }
+        }
+
+        let client = self.redis_client.clone();
+        match client {
+            Some(c) => {
+                let con = c.get_connection();
+                let key = if prefix.is_empty() {
+                    key
+                } else {
+                    &*format!("{}:{}", prefix, key)
+                };
+                _redis_set(con, key, val, self.redis_key_for_msg_expired)
+            }
+            None => false,
+        }
+    }
+    pub async fn init_redis(&mut self) {
+        let guard = self.config.read().await;
+        self.redis_client = if guard.admin.redis_uri.is_empty() {
+            None
+        } else {
+            self.redis_key_for_msg_expired = if guard.admin.redis_key_for_msg_expired > 3600 {
+                guard.admin.redis_key_for_msg_expired
+            } else {
+                3600
+            };
+            let client = Client::open(guard.admin.redis_uri.clone());
+            match client {
+                Ok(c) => {
+                    info!(target: "store::redis", "done redis Client::open {} ok", guard.admin.redis_uri);
+                    Some(c)
+                }
+                Err(e) => {
+                    warn!(target: "store::redis", "skip redis Client::open {} err {}", guard.admin.redis_uri, e.to_string());
+                    None
+                }
+            }
+        };
     }
 
     /// 检查是否已设置密码
@@ -111,9 +174,25 @@ impl StoreManager {
         !self.config.read().await.admin.password_hash.is_empty()
     }
 
+    pub async fn get_api_keys(&self) -> Option<Vec<ApiKeyEntry>> {
+        let guard = self.config.read().await;
+        Some(guard.api_keys.clone())
+    }
+    pub async fn get_password_hash(&self) -> Option<String> {
+        let guard = self.config.read().await;
+        if guard.admin.password_hash.is_empty() {
+            None
+        } else {
+            Some(guard.admin.password_hash.clone())
+        }
+    }
+
     /// 验证密码
     pub async fn verify_password(&self, plain: &str) -> bool {
         let guard = self.config.read().await;
+        if &guard.admin.password_hash == "*" {
+            return true;
+        }
         bcrypt::verify(plain, &guard.admin.password_hash).unwrap_or(false)
     }
 
