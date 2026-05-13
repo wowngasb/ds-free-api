@@ -23,7 +23,7 @@ use crate::openai_adapter::types::{
 };
 
 static CALL_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
-pub(crate) const MAX_XML_BUF_LEN: usize = 64 * 1024;
+pub(crate) const MAX_XML_BUF_LEN: usize = 6400 * 1024;
 
 pub(crate) const TOOL_CALL_START: &str = "<|tool▁calls▁begin|>";
 pub(crate) const TOOL_CALL_END: &str = "<|tool▁calls▁end|>";
@@ -31,7 +31,7 @@ const W: usize = 71;
 
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(1);
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TagConfig {
     pub starts: Vec<String>,
     pub ends: Vec<String>,
@@ -294,11 +294,108 @@ fn repair_json(s: &str) -> Option<String> {
 pub fn parse_tool_calls(xml: &str) -> Option<(Vec<ToolCall>, String)> {
     parse_tool_calls_with(
         xml,
-        &TagConfig::from_config(&crate::config::ToolCallTagConfig::default()),
+        &TagConfig::from_config(&crate::config::ToolCallTagConfig::default()), "test-xxx"
     )
 }
 
-pub fn parse_tool_calls_with(xml: &str, cfg: &TagConfig) -> Option<(Vec<ToolCall>, String)> {
+pub fn parse_tool_calls_with_id(xml: &str, request_id: &str) -> Option<(Vec<ToolCall>, String)> {
+    if request_id == "" {
+        parse_tool_calls(xml)
+    } else {
+        parse_tool_calls_with(
+            xml,
+            &TagConfig::from_config(&crate::config::ToolCallTagConfig::default()), request_id
+        )
+    }
+}
+
+fn extract_json_text(text: &str) -> Option<String> {
+    let fixed = text
+        .replace("\n<|tool", "<|tool").replace("\n<|tool", "<|tool")
+        .replace("\"}]<|tool", "\"}}]<|tool")
+        .replace("\"}]}]<|tool", "\"}]}}]<|tool")
+        .replace("\"}}<|tool", "\"}}]<|tool")
+        .replace("\"}<|tool", "\"}}]<|tool")
+        .replace("\"}, {\"name\"", "\"}}, {\"name\"");
+
+    let mut parts = fixed.splitn(2, "begin|>");
+    let _before = parts.next()?;
+    let after_begin = parts.next()?;
+    let json_part = after_begin.rsplitn(2, "<|tool").next()?;
+    Some(json_part.to_string())
+}
+
+pub fn parse_tool_calls_json(xml: &str, json_str: &str, request_id: &str) -> Option<Vec<serde_json::Value>> {
+    if let Ok(a) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
+        Some(a)
+    } else {
+        let fixed = extract_json_text(xml)?;
+        if let Ok(a) = serde_json::from_str::<Vec<serde_json::Value>>(&*fixed) {
+            return Some(a)
+        }
+        if let Some(store) = crate::server::G_STORE.get() {
+            store.redis_set("tool_step0", request_id, &*fixed);
+        }
+
+        let step0 = json_str.trim_end().trim_end_matches(&[']', '}']).trim_end();
+        let step1 = if step0.ends_with("\\") {
+            &*(step0.to_string() + "n// --- auto fix, not end !!! --- \\n}\"")
+        } else {
+            step0
+        };
+
+        // [..., {"name": "x", "arguments": {"map": "xxx"
+        let step2 = step1.to_string() + "}}]";
+        if let Ok(a) = serde_json::from_str::<Vec<serde_json::Value>>(&*step2) {
+            return Some(a)
+        }
+        if let Some(store) = crate::server::G_STORE.get() {
+            store.redis_set("tool_step2", request_id, &*step2);
+        }
+
+        // [..., {"name": "x", "arguments": {"todos": [{"x": "xx"
+        let step3 = step1.to_string() + "}]}}]";
+        if let Ok(a) = serde_json::from_str::<Vec<serde_json::Value>>(&*step3) {
+            return Some(a)
+        }
+        if let Some(store) = crate::server::G_STORE.get() {
+            store.redis_set("tool_step3", request_id, &*step3);
+        }
+
+        // [..., {"name": "x", "arguments": {"list": ["x", "xx"
+        let step4 = step1.to_string() + "]}}]";
+        if let Ok(a) = serde_json::from_str::<Vec<serde_json::Value>>(&*step4) {
+            return Some(a)
+        }
+        if let Some(store) = crate::server::G_STORE.get() {
+            store.redis_set("tool_step4", request_id, &*step4);
+        }
+
+        // [..., {"name": "x", "arguments": {"map": {"x": "xx"
+        let step5 = step1.to_string() + "}}}]";
+        if let Ok(a) = serde_json::from_str::<Vec<serde_json::Value>>(&*step5) {
+            return Some(a)
+        }
+        if let Some(store) = crate::server::G_STORE.get() {
+            store.redis_set("tool_step5", request_id, &*step5);
+        }
+
+        let repaired = repair_json(json_str).unwrap_or_default();
+        let obj_str = repaired.trim_start_matches('[');
+        let obj_start = obj_str.find('{')?;
+        let obj_end = obj_str.rfind('}').map(|p| p + 1).unwrap_or(obj_str.len());
+
+        if let Some(store) = crate::server::G_STORE.get() {
+            store.redis_set("tool_step9", request_id, &obj_str[obj_start..obj_end]);
+        }
+        serde_json::from_str(&obj_str[obj_start..obj_end])
+            .ok()
+            .filter(|v: &serde_json::Value| v.is_object())
+            .map(|v| vec![v])
+    }
+}
+
+pub fn parse_tool_calls_with(xml: &str, cfg: &TagConfig, request_id: &str) -> Option<(Vec<ToolCall>, String)> {
     let (start, start_tag) = find_start_tag_with(xml, cfg)?;
     let after_start = start + start_tag.len();
     if is_inside_code_fence(xml, start) {
@@ -318,18 +415,7 @@ pub fn parse_tool_calls_with(xml: &str, cfg: &TagConfig) -> Option<(Vec<ToolCall
             if json_str.trim() == "[]" {
                 return None;
             }
-            if let Ok(a) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
-                a
-            } else {
-                let repaired = repair_json(json_str).unwrap_or_default();
-                let obj_str = repaired.trim_start_matches('[');
-                let obj_start = obj_str.find('{')?;
-                let obj_end = obj_str.rfind('}').map(|p| p + 1).unwrap_or(obj_str.len());
-                serde_json::from_str(&obj_str[obj_start..obj_end])
-                    .ok()
-                    .filter(|v: &serde_json::Value| v.is_object())
-                    .map(|v| vec![v])?
-            }
+            parse_tool_calls_json(xml, json_str, request_id)?
         }
         None => {
             if let Some(obj_start) = inner.find('{') {
@@ -471,6 +557,7 @@ pin_project! {
         inner: S,
         state: ToolParseState,
         model: String,
+        request_id: String,
         finish_emitted: bool,
         repair_pending: Option<String>,
         tag_config: Arc<TagConfig>,
@@ -479,13 +566,14 @@ pin_project! {
 }
 
 impl<S> ToolCallStream<S> {
-    pub fn new(inner: S, model: String, tag_config: Arc<TagConfig>) -> Self {
+    pub fn new(inner: S, model: String, request_id: String, tag_config: Arc<TagConfig>) -> Self {
         Self {
             inner,
             state: ToolParseState::Detecting {
                 buffer: String::new(),
             },
             model,
+            request_id,
             finish_emitted: false,
             repair_pending: None,
             tag_config,
@@ -567,6 +655,9 @@ where
                                     trace!(target: "adapter", ">>> 检测到 start_tag={}, buf_len={}", start_tag, buffer.len());
                                     let before = buffer[..pos].to_string();
                                     let rest = std::mem::take(buffer)[pos..].to_string();
+                                    if rest.len() > 100 && let Some(store) = crate::server::G_STORE.get() {
+                                        store.redis_rpush("tool_tag", this.request_id, &*rest);
+                                    }
                                     if let Some((end_pos, matched_end)) = find_end_tag_with(
                                         &rest,
                                         start_tag.len(),
@@ -593,7 +684,10 @@ where
                                         }
                                         let end_abs = end_pos + matched_end.len();
                                         let collected = &rest[..end_abs];
-                                        if let Some((calls, _)) = parse_tool_calls(collected) {
+                                        if let Some((calls, _)) = parse_tool_calls_with_id(collected, this.request_id) {
+                                            if let Some(store) = crate::server::G_STORE.get() {
+                                                store.redis_set("tool_parser", this.request_id, collected);
+                                            }
                                             debug!(target: "adapter", "tool_parser 解析出 {} 个工具调用", calls.len());
                                             choice.delta.content = if before.is_empty() {
                                                 None
@@ -606,6 +700,9 @@ where
                                             }
                                             *this.state = ToolParseState::Done;
                                         } else {
+                                            if let Some(store) = crate::server::G_STORE.get() {
+                                                store.redis_set("tool_parser_x", this.request_id, collected);
+                                            }
                                             trace!(target: "adapter", "tool_parser 解析失败，collected=\n{}", &collected[..collected.len().min(500)]);
                                             warn!(target: "adapter", "tool_parser 解析失败→请求修复");
                                             let collected = collected.to_string();
@@ -673,7 +770,10 @@ where
                                     let end_abs = end_pos + en_tag.len();
                                     let collected = buf[..end_abs].to_string();
                                     let _tail = buf.split_off(end_abs);
-                                    if let Some((calls, _)) = parse_tool_calls(&collected) {
+                                    if let Some((calls, _)) = parse_tool_calls_with_id(&collected, this.request_id) {
+                                        if let Some(store) = crate::server::G_STORE.get() {
+                                            store.redis_set("tool_parser", this.request_id, &*collected);
+                                        }
                                         debug!(target: "adapter", "tool_parser 解析出 {} 个工具调用", calls.len());
                                         choice.delta.content = None;
                                         choice.delta.tool_calls = Some(calls);
@@ -682,6 +782,9 @@ where
                                         }
                                         *this.state = ToolParseState::Done;
                                     } else {
+                                        if let Some(store) = crate::server::G_STORE.get() {
+                                            store.redis_set("tool_parser_x", this.request_id, &*collected);
+                                        }
                                         trace!(target: "adapter", "tool_parser 解析失败(流结束)，collected=\n{}", &collected[..collected.len().min(500)]);
                                         warn!(target: "adapter", "tool_parser 解析失败→请求修复");
                                         return Poll::Ready(Some(Err(
@@ -717,7 +820,7 @@ where
                         ToolParseState::CollectingXml { buf, start_tag: _ } => {
                             if choice.finish_reason.is_some() {
                                 let flushed = std::mem::take(buf);
-                                if let Some((calls, _)) = parse_tool_calls(&flushed) {
+                                if let Some((calls, _)) = parse_tool_calls_with_id(&flushed, this.request_id) {
                                     debug!(target: "adapter", "tool_parser 流结束时解析出 {} 个工具调用", calls.len());
                                     choice.delta.tool_calls = Some(calls);
                                     if choice.finish_reason == Some("stop") {
@@ -766,7 +869,7 @@ where
                         return Poll::Ready(None);
                     }
                     ToolParseState::CollectingXml { buf, start_tag: _ } => {
-                        if let Some((calls, _)) = parse_tool_calls(&buf) {
+                        if let Some((calls, _)) = parse_tool_calls_with_id(&buf, this.request_id) {
                             debug!(target: "adapter", "tool_parser 流结束时解析出 {} 个工具调用", calls.len());
                             let chunk = make_end_chunk(
                                 this.model,
@@ -833,6 +936,44 @@ mod tests {
         let (calls, remaining) = parse_tool_calls(&xml).unwrap();
         assert!(remaining.is_empty());
         assert_eq!(calls.len(), 2);
+    }
+
+
+    #[test]
+    fn parse_json_multiple_tools_fix() {
+        let xml = tool(
+            r#"<|tool▁calls▁begin|>[{"name": "get_time", "arguments": {"tz": "bj"}]<|tool▁calls▁end|"#,
+        );
+        let (calls, remaining) = parse_tool_calls(&xml).unwrap();
+        assert!(remaining.is_empty());
+        assert_eq!(calls.len(), 1);
+        {
+            let xml = tool(
+                r#"<|tool▁calls▁begin|>[{"name": "get_weather", "arguments": {}}, {"name": "get_time", "arguments": {"tz": "bj"}]<|tool▁calls▁end|"#,
+            );
+            let (calls, remaining) = parse_tool_calls(&xml).unwrap();
+            assert!(remaining.is_empty());
+            assert_eq!(calls.len(), 2);
+        }
+    }
+
+
+    #[test]
+    fn parse_json_multiple_tools_fix2() {
+        let xml = tool(
+            r#"<|tool▁calls▁begin|>[{"name": "get_time", "arguments": {"tzs": ["bj", "bj"]}]<|tool▁calls▁end|"#,
+        );
+        let (calls, remaining) = parse_tool_calls(&xml).unwrap();
+        assert!(remaining.is_empty());
+        assert_eq!(calls.len(), 1);
+        {
+            let xml = tool(
+                r#"<|tool▁calls▁begin|>[{"name": "get_time", "arguments": {"tzs": [{}, {}]}]<|tool▁calls▁end|"#,
+            );
+            let (calls, remaining) = parse_tool_calls(&xml).unwrap();
+            assert!(remaining.is_empty());
+            assert_eq!(calls.len(), 1);
+        }
     }
 
     #[test]

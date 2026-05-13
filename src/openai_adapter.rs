@@ -174,6 +174,7 @@ impl OpenAIAdapter {
                 chat_resp.stream,
                 req.model,
                 response::StreamCfg {
+                    request_id: request_id.to_string(),
                     include_usage: norm.include_usage,
                     include_obfuscation: norm.include_obfuscation,
                     stop: norm.stop,
@@ -193,6 +194,7 @@ impl OpenAIAdapter {
                 chat_resp.stream,
                 req.model,
                 response::StreamCfg {
+                    request_id: request_id.to_string(),
                     include_usage: true,
                     include_obfuscation: false,
                     stop: norm.stop,
@@ -409,6 +411,7 @@ impl OpenAIAdapter {
         self.ds_core.reload_config(new_config).await
     }
 
+    // KL IMPORTANT
     pub(crate) async fn create_repair_fn(
         &self,
         request_id: &str,
@@ -456,7 +459,7 @@ impl OpenAIAdapter {
                     .v0_chat(req, &repair_req_id)
                     .await
                     .map_err(OpenAIAdapterError::from)?;
-                response::execute_tool_repair(resp.stream, &tag_config).await
+                response::execute_tool_repair(resp.stream, &tag_config, req_id).await
             })
         })
     }

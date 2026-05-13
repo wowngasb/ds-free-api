@@ -64,12 +64,15 @@ fn random_padding(len: usize) -> String {
 }
 
 pub(crate) fn sse_serialize(
-    chunk: &ChatCompletionsResponseChunk,
+    chunk: &ChatCompletionsResponseChunk
 ) -> Result<Bytes, OpenAIAdapterError> {
     let mut buf = Vec::with_capacity(256);
     buf.extend_from_slice(b"data: ");
     serde_json::to_writer(&mut buf, chunk).map_err(OpenAIAdapterError::from)?;
     buf.extend_from_slice(b"\n\n");
+    if let Some(store) = crate::server::G_STORE.get() {
+        store.redis_rpush_u8("sse_serialize", &*chunk.id, &buf);
+    }
     Ok(Bytes::from(buf))
 }
 
@@ -94,7 +97,7 @@ pub(crate) type RepairFn = Arc<
 /// 执行 tool_calls 修复：将 ds_core 字节流解析后提取文本，转换为结构化 ToolCall
 pub(crate) async fn execute_tool_repair(
     ds_stream: Pin<Box<dyn Stream<Item = Result<Bytes, crate::ds_core::CoreError>> + Send>>,
-    tag_config: &TagConfig,
+    tag_config: &TagConfig, req_id: String
 ) -> Result<Vec<ToolCall>, OpenAIAdapterError> {
     let sse = sse_parser::SseStream::new(ds_stream);
     let state_stream = state::StateStream::new(sse);
@@ -123,7 +126,10 @@ pub(crate) async fn execute_tool_repair(
         )
     };
 
-    let (calls, _) = tool_parser::parse_tool_calls_with(&wrapped, tag_config).ok_or_else(|| {
+    if let Some(store) = crate::server::G_STORE.get() {
+        store.redis_set("tool_wrapped", &*req_id, &*wrapped);
+    }
+    let (calls, _) = tool_parser::parse_tool_calls_with(&wrapped, tag_config, &*req_id).ok_or_else(|| {
         OpenAIAdapterError::Internal(format!(
             "修复模型返回无法解析为工具调用: {}",
             &text[..text.len().min(200)]
@@ -159,18 +165,20 @@ pin_project! {
         repair_fn: Option<RepairFn>,
         state: RepairState,
         model: String,
+        request_id: String,
         #[pin]
         keepalive_deadline: Sleep,
     }
 }
 
 impl RepairStream {
-    fn new(inner: ChunkStream, repair_fn: RepairFn, model: String) -> Self {
+    fn new(inner: ChunkStream, repair_fn: RepairFn, model: String, request_id: String) -> Self {
         Self {
             inner: Some(inner),
             repair_fn: Some(repair_fn),
             state: RepairState::Forwarding,
             model,
+            request_id,
             keepalive_deadline: tokio::time::sleep_until(
                 tokio::time::Instant::now() + KEEPALIVE_INTERVAL,
             ),
@@ -199,6 +207,9 @@ impl Stream for RepairStream {
                                 "RepairStream 捕获修复请求: len={}",
                                 tool_text.len()
                             );
+                            if let Some(store) = crate::server::G_STORE.get() {
+                                store.redis_set("tool_repair", this.request_id, &*tool_text);
+                            }
                             trace!(target: "adapter", ">>> repair: accepting tool_text len={}", tool_text.len());
                             drop(this.inner.as_mut().get_mut().take());
                             if let Some(f) = this.repair_fn.take() {
@@ -377,7 +388,9 @@ where
 }
 
 /// 流式响应参数（减少 stream() 参数个数）
+#[derive(Default)]
 pub(crate) struct StreamCfg {
+    pub request_id: String,
     pub include_usage: bool,
     pub include_obfuscation: bool,
     pub stop: Vec<String>,
@@ -405,7 +418,7 @@ where
         cfg.include_obfuscation,
         cfg.prompt_tokens,
     );
-    let tool_parsed = tool_parser::ToolCallStream::new(converted, model.clone(), cfg.tag_config);
+    let tool_parsed = tool_parser::ToolCallStream::new(converted, model.clone(), cfg.request_id.clone(), cfg.tag_config);
     let tool_boxed: Pin<
         Box<dyn Stream<Item = Result<ChatCompletionsResponseChunk, OpenAIAdapterError>> + Send>,
     > = Box::pin(tool_parsed);
@@ -413,7 +426,7 @@ where
     let after_repair: Pin<
         Box<dyn Stream<Item = Result<ChatCompletionsResponseChunk, OpenAIAdapterError>> + Send>,
     > = if let Some(f) = cfg.repair_fn {
-        Box::pin(RepairStream::new(tool_boxed, f, model))
+        Box::pin(RepairStream::new(tool_boxed, f, model, cfg.request_id.clone()))
     } else {
         tool_boxed
     };
@@ -655,6 +668,7 @@ mod tests {
                 prompt_tokens: 0,
                 repair_fn: None,
                 tag_config: default_tag_config(),
+                ..Default::default()
             },
         )
         .await
@@ -681,6 +695,7 @@ mod tests {
                 prompt_tokens: 0,
                 repair_fn: None,
                 tag_config: default_tag_config(),
+                ..Default::default()
             },
         )
         .await
@@ -706,6 +721,7 @@ mod tests {
                 prompt_tokens: 0,
                 repair_fn: None,
                 tag_config: default_tag_config(),
+                ..Default::default()
             },
         )
         .await
@@ -761,6 +777,7 @@ mod tests {
                 prompt_tokens: 0,
                 repair_fn: None,
                 tag_config: default_tag_config(),
+                ..Default::default()
             },
         )))
         .await;
@@ -798,6 +815,7 @@ mod tests {
                 prompt_tokens: 0,
                 repair_fn: None,
                 tag_config: default_tag_config(),
+                ..Default::default()
             },
         )))
         .await;
@@ -842,6 +860,7 @@ mod tests {
                 prompt_tokens: 0,
                 repair_fn: None,
                 tag_config: default_tag_config(),
+                ..Default::default()
             },
         )))
         .await;
@@ -885,6 +904,7 @@ mod tests {
                 prompt_tokens: 0,
                 repair_fn: None,
                 tag_config: default_tag_config(),
+                ..Default::default()
             },
         )))
         .await;
@@ -945,6 +965,7 @@ mod tests {
                 prompt_tokens: 0,
                 repair_fn: None,
                 tag_config: default_tag_config(),
+                ..Default::default()
             },
         )))
         .await;
@@ -992,6 +1013,7 @@ mod tests {
                 prompt_tokens: 0,
                 repair_fn: None,
                 tag_config: default_tag_config(),
+                ..Default::default()
             },
         )))
         .await;
@@ -1056,6 +1078,7 @@ mod tests {
                 prompt_tokens: 0,
                 repair_fn: None,
                 tag_config: default_tag_config(),
+                ..Default::default()
             },
         )
         .await
@@ -1095,6 +1118,7 @@ mod tests {
                 prompt_tokens: 0,
                 repair_fn: None,
                 tag_config: default_tag_config(),
+                ..Default::default()
             },
         )))
         .await;
@@ -1152,6 +1176,7 @@ mod tests {
                 prompt_tokens: 0,
                 repair_fn: None,
                 tag_config: default_tag_config(),
+                ..Default::default()
             },
         )))
         .await;
@@ -1202,6 +1227,7 @@ mod tests {
                 prompt_tokens: 0,
                 repair_fn: None,
                 tag_config: default_tag_config(),
+                ..Default::default()
             },
         )))
         .await;
@@ -1244,6 +1270,7 @@ mod tests {
                 prompt_tokens: 0,
                 repair_fn: None,
                 tag_config: default_tag_config(),
+                ..Default::default()
             },
         )))
         .await;
@@ -1275,6 +1302,7 @@ mod tests {
                 prompt_tokens: 0,
                 repair_fn: None,
                 tag_config: default_tag_config(),
+                ..Default::default()
             },
         )))
         .await;
